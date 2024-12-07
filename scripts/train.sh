@@ -32,4 +32,5 @@ torchrun --nnodes 1 --nproc_per_node 1 \
     --num_passkey ${num_passkey} \
     --dataset_format "multiple_passkey" \
     --output_dir attn_patterns/${exp_name} \
-    --disable_wandb
+    --disable_wandb \
+    --streaming_attn_implementation sdpa
