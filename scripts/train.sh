@@ -1,5 +1,5 @@
-export TOKENIZERS_PARALLELISM=true
-export OMP_NUM_THREADS=8
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=1
 
 model_name=${1}
 ctx_len_min=${2}
@@ -10,7 +10,7 @@ num_passkey=${6}
 setting="lr=${lr}-reg=${reg_weight}-ctx=${ctx_len_min}_${ctx_len_max}-multi_passkey${num_passkey}"
 exp_name=${model_name}/${setting}
 
-torchrun --nnodes 1 --nproc_per_node 8 \
+torchrun --nnodes 1 --nproc_per_node 1 \
     duo_attn/train.py \
     --model_name models/${model_name} \
     --batch_size 1 \
@@ -31,4 +31,5 @@ torchrun --nnodes 1 --nproc_per_node 8 \
     --gradient_accumulation_steps 1 \
     --num_passkey ${num_passkey} \
     --dataset_format "multiple_passkey" \
-    --output_dir attn_patterns/${exp_name}
+    --output_dir attn_patterns/${exp_name} \
+    --disable_wandb
