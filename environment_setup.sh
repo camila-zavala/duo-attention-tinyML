@@ -19,8 +19,3 @@ pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
 
 # Install DuoAttention
 pip install -e .
-
-# Install Block Sparse Streaming Attention
-git clone https://github.com/mit-han-lab/Block-Sparse-Attention.git
-cd Block-Sparse-Attention
-python setup.py install
