@@ -15,7 +15,7 @@ pip install flash-attn --no-build-isolation
 # LongBench evaluation
 pip install seaborn rouge_score einops pandas
 
-pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.4/
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3/
 
 # Install DuoAttention
 pip install -e .
