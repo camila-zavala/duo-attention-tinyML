@@ -6,8 +6,8 @@ ctx_len_min=${2}
 ctx_len_max=${3}
 reg_weight=${4}
 lr=${5}
-num_passkey=${6}
-setting="lr=${lr}-reg=${reg_weight}-ctx=${ctx_len_min}_${ctx_len_max}-multi_passkey${num_passkey}"
+num_video_frames=${6}
+setting="lr=${lr}-reg=${reg_weight}-ctx=${ctx_len_min}_${ctx_len_max}-frames${num_video_frames}"
 exp_name=${model_name}/${setting}
 
 torchrun --nnodes 1 --nproc_per_node 1 \
@@ -29,10 +29,13 @@ torchrun --nnodes 1 --nproc_per_node 1 \
     --context_lengths_num_intervals 50 \
     --depth_ratio_num_intervals 1000 \
     --gradient_accumulation_steps 1 \
-    --num_passkey ${num_passkey} \
+    --num_passkey 10 \
     --dataset_format "multiple_passkey" \
     --output_dir /content/drive/MyDrive/attn_patterns/${exp_name} \
     --disable_wandb \
     --streaming_attn_implementation sdpa \
     --save_steps 10 \
-    --resume
+    # --resume \
+    --anno-path "/content/drive/MyDrive/VNBench-annotations.json" \
+    --video-dir "/content/drive/MyDrive" \
+    --num-video-frames ${num_video_frames} \
