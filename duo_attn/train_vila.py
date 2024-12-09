@@ -6,6 +6,17 @@ from tqdm import tqdm
 import json
 import wandb
 import matplotlib.pyplot as plt
+import os.path as osp
+
+import re
+from io import BytesIO
+import json
+import time
+
+import requests
+import torch
+from PIL import Image
+
 from duo_attn.utils import (
     get_model,
     parse_args,
@@ -49,8 +60,17 @@ from transformers.models.mistral.modeling_mistral import (
 )
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
+from llava.constants import (
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IMAGE_TOKEN,
+    IMAGE_PLACEHOLDER,
+    IMAGE_TOKEN_INDEX,
+)
+from llava.conversation import SeparatorStyle, conv_templates
+from llava.mm_utils import KeywordsStoppingCriteria, get_model_name_from_path, process_images, tokenizer_image_token
 from llava.model.builder import load_pretrained_model
-from llava.mm_utils import get_model_name_from_path
+from llava.utils import disable_torch_init
 
 
 def setup():
@@ -73,9 +93,15 @@ def apply_fsdp(model: torch.nn.Module, mesh, mp_policy, modules_to_shard):
             fully_shard(module, **fsdp_config)
     fully_shard(model, **fsdp_config)
 
+def get_prompt(question, options):
+  prompt = f"<video>\n {question} Answer with just a single letter corresponding to the option."
+  option_letters = 'ABCD'
+  for i, option in enumerate(options):
+    prompt += f"\n{option_letters[i]}. {option}"
+  return prompt
 
 def train(
-    args, model, rank, world_size, train_dataloader, optimizer, scheduler, resume_step
+    args, model, image_processor, tokenizer, rank, world_size, train_dataloader, optimizer, scheduler, resume_step
 ):
     model.train()
 
@@ -90,7 +116,7 @@ def train(
     while True:
         if global_step >= args.num_steps:
             break
-        for step, batch in enumerate(train_dataloader):
+        for step, item in enumerate(train_dataloader):
             if global_step <= resume_step:
                 global_step += 1
                 if rank == 0:
@@ -104,42 +130,47 @@ def train(
             def clamp_(x, min_val, max_val):
                 x.clamp_(min_val, max_val)
 
-            map_full_attention_heads(model, func=lambda x: clamp_(x, 0, 1))
+            map_full_attention_heads(model.llm, func=lambda x: clamp_(x, 0, 1))
 
-            batch = {k: v.to(f"cuda:{local_rank}") for k, v in batch.items()}
+            video_file = args.video_dir + item['video'][1:]
+            from llava.mm_utils import opencv_extract_frames
+            images, num_frames = opencv_extract_frames(video_file, args.num_video_frames)
 
-            # duplicate for the two way forward
-            input_ids = torch.cat([batch["input_ids"], batch["input_ids"]], dim=0)
+            qs = get_prompt(item['question'], item['options'])
+            image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+            if IMAGE_PLACEHOLDER in qs:
+                if model.config.mm_use_im_start_end:
+                    qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, qs)
+                else:
+                    qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
+            else:
+                if DEFAULT_IMAGE_TOKEN not in qs:
+                    # do not repeatively append the prompt.
+                    if model.config.mm_use_im_start_end:
+                        qs = (image_token_se + "\n") * len(images) + qs
+                    else:
+                        qs = (DEFAULT_IMAGE_TOKEN + "\n") * len(images) + qs
 
-            seq_len = input_ids.shape[1]
-            seq_parallel_chunk_size = seq_len // world_size
-            seq_parallel_chunk_start = seq_parallel_chunk_size * rank
-            seq_parallel_chunk_end = seq_parallel_chunk_start + seq_parallel_chunk_size
-            position_ids = torch.arange(
-                seq_parallel_chunk_start,
-                seq_parallel_chunk_end,
-                device=input_ids.device,
-            ).unsqueeze(0)
+            conv_mode = "llava_v0"
+            conv = conv_templates[conv_mode].copy()
+            conv.append_message(conv.roles[0], qs)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
 
+            images_tensor = process_images(images, image_processor, model.config).to(model.device, dtype=torch.float16)
+            input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()
+            attention_mask = input_ids.new_ones(input_ids.shape)
             outputs = model(
-                input_ids=input_ids[:, seq_parallel_chunk_start:seq_parallel_chunk_end],
-                position_ids=position_ids,
+                input_ids,
+                images=[
+                    images_tensor,
+                ],
+                attention_mask=attention_mask
             )
 
-            hidden_states = outputs[0]
-
-            original_hidden_states = hidden_states[: args.batch_size]
-            pruned_hidden_states = hidden_states[args.batch_size :]
-
-            labels = batch["labels"][:, seq_parallel_chunk_start:seq_parallel_chunk_end]
-            label_mask = labels != -100
-            num_labels = label_mask.sum()
-            global_num_labels = num_labels.clone().detach()
-            dist.all_reduce(global_num_labels)
-
-            # filter out label == IGNORE_INDEX (-100)
-            original_hidden_states = original_hidden_states[label_mask].float()
-            pruned_hidden_states = pruned_hidden_states[label_mask].float()
+            hidden_states = outputs.logits
+            original_hidden_states = hidden_states[:1]
+            pruned_hidden_states = hidden_states[1:]
 
             distill_loss = (
                 (original_hidden_states - pruned_hidden_states)
@@ -147,12 +178,11 @@ def train(
                 .mean(dim=-1)
                 .sum()
                 * world_size
-                / global_num_labels
             )
 
-            full_attention_heads = get_full_attention_heads(model)
+            full_attention_heads = get_full_attention_heads(model.llm)
             full_attention_heads = [
-                h.full_tensor().to(original_hidden_states.device)
+                h.data.to(original_hidden_states.device)
                 for h in full_attention_heads
             ]
 
@@ -184,7 +214,7 @@ def train(
                 if not args.disable_wandb:
                     fig = visualize_pruned_attention_heads(full_attention_heads_list)
 
-                    sample_len = batch["input_ids"].shape[1]
+                    sample_len = item["input_ids"].shape[1]
                     wandb.log(
                         {
                             "distill_loss": distill_loss.item(),
@@ -200,7 +230,7 @@ def train(
                     plt.close(fig)
 
                 pbar.set_description(
-                    f"Len={seq_len}/{global_num_labels}|Dloss={distill_loss.item():.3f}|Rloss={reg_loss.item():.3f}|LR={optimizer.param_groups[0]['lr']:.2e}"
+                    f"Dloss={distill_loss.item():.3f}|Rloss={reg_loss.item():.3f}|LR={optimizer.param_groups[0]['lr']:.2e}"
                 )
                 pbar.update(1)
 
@@ -256,30 +286,18 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-    tokenizer = get_tokenizer(args.model_name)
-
-    if args.config_name is not None:
-        config = AutoConfig.from_pretrained(args.config_name)
-    else:
-        config = AutoConfig.from_pretrained(args.model_name)
-
-    if args.rope_theta is not None:
-        print(f"Setting rope_theta from {config.rope_theta} to {args.rope_theta}")
-        config.rope_theta = args.rope_theta
-
-    model = load_pretrained_model(args.model_name, get_model_name_from_path(args.model_name))
+    model_name = get_model_name_from_path(args.model_name)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_name, model_name, args.model_base)
 
     enable_duo_attention_training(
-        model,
-        args.sink_size,
-        args.recent_size,
-        args.max_length,
-        initial_value=args.initial_value,
-        enable_ulysses_attention=True,
-        streaming_attn_implementation=args.streaming_attn_implementation,
+      model.llm,
+      sink_size=args.sink_size,
+      recent_size=args.recent_size,
+      max_length=args.context_length_max,
+      initial_value=1.0,
+      enable_ulysses_attention=False,
+      streaming_attn_implementation="sdpa"
     )
-
-    model = model.model
 
     for param in model.parameters():
         param.requires_grad = False
@@ -300,16 +318,6 @@ def main(args):
 
     apply_activation_checkpointing(model)
 
-    # mesh = None
-    mesh = DeviceMesh(device_type="cuda", mesh=[i for i in range(world_size)])
-
-    apply_fsdp(
-        model,
-        mesh,
-        mp_policy,
-        modules_to_shard={LlamaDecoderLayer, MistralDecoderLayer},
-    )
-
     if rank == 0:
         print(model)
         for name, param in model.named_parameters():
@@ -318,27 +326,8 @@ def main(args):
                     f"Trainable parameter: {name} with shape {param.shape}, dtype {param.dtype}, device {param.device}"
                 )
 
-    haystack_dataset = get_dataset(args.dataset_name, split="train")
-
-    if args.dataset_format == "multiple_passkey":
-        train_dataset = MultiplePasskeyRetrievalDataset(
-            haystack_dataset,
-            tokenizer,
-            max_length=args.max_length,
-            min_depth_ratio=args.min_needle_depth_ratio,
-            max_depth_ratio=args.max_needle_depth_ratio,
-            context_length_min=args.context_length_min,
-            context_length_max=args.context_length_max,
-            context_lengths_num_intervals=args.context_lengths_num_intervals,
-            depth_ratio_num_intervals=args.depth_ratio_num_intervals,
-            num_passkeys=args.num_passkeys,
-        )
-    else:
-        raise ValueError(f"Invalid dataset format: {args.dataset_format}")
-
-    train_dataloader = get_supervised_dataloader(
-        train_dataset, tokenizer, args.batch_size, shuffle=True
-    )
+    with open(args.anno_path, 'r') as file:
+        data = json.load(file)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0)
 
@@ -378,7 +367,7 @@ def main(args):
         full_attention_heads = load_full_attention_heads(
             args.output_dir, filename="full_attention_heads_latest.tsv"
         )
-        set_full_attention_heads(model, full_attention_heads)
+        set_full_attention_heads(model.llm, full_attention_heads)
         resume_step = state["global_step"]
         print(f"Resuming from step {resume_step}")
     else:
@@ -387,16 +376,18 @@ def main(args):
     train(
         args,
         model,
+        image_processor,
+        tokenizer,
         rank,
         world_size,
-        train_dataloader,
+        data,
         optimizer,
         scheduler,
         resume_step,
     )
 
-    full_attention_heads = get_full_attention_heads(model)
-    full_attention_heads = [h.full_tensor() for h in full_attention_heads]
+    full_attention_heads = get_full_attention_heads(model.llm)
+    full_attention_heads = [h.data for h in full_attention_heads]
 
     if rank == 0:
         print("Training finished")
