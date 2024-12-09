@@ -142,7 +142,7 @@ def llama_duo_attention_forward_two_way(
 
     if not output_attentions:
         attn_weights = None
-
+    
     return attn_output, attn_weights, past_key_value
 
 
@@ -636,7 +636,11 @@ def get_llama_full_attention_heads(model):
                 continue
             full_attention_heads.append(module.full_attention_heads)
     else:
-        raise ValueError("Model type not supported")
+        for layer in model.model.layers:
+            module = layer.self_attn
+            if not hasattr(module, "full_attention_heads"):
+                continue
+            full_attention_heads.append(module.full_attention_heads)
 
     return full_attention_heads
 
@@ -669,7 +673,13 @@ def set_llama_full_attention_heads(model, full_attention_heads):
                 module.full_attention_heads.device, module.full_attention_heads.dtype
             )
     else:
-        raise ValueError("Model type not supported")
+        for layer_idx, layer in enumerate(model.model.layers):
+            module = layer.self_attn
+            if not hasattr(module, "full_attention_heads"):
+                continue
+            module.full_attention_heads.data = full_attention_heads[layer_idx].to(
+                module.full_attention_heads.device, module.full_attention_heads.dtype
+            )
 
 
 def map_llama_full_attention_heads(model, func):
@@ -693,4 +703,8 @@ def map_llama_full_attention_heads(model, func):
                 continue
             func(module.full_attention_heads)
     else:
-        raise ValueError("Model type not supported")
+        for layer in model.model.layers:
+            module = layer.self_attn
+            if not hasattr(module, "full_attention_heads"):
+                continue
+            func(module.full_attention_heads)
