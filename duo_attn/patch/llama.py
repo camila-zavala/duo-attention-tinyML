@@ -49,6 +49,9 @@ def llama_duo_attention_forward_two_way(
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     bsz_x_2, q_len, _ = hidden_states.size()
+    if bsz_x_2 == 1:
+      hidden_states = torch.cat([hidden_states, hidden_states], dim=0)
+      bsz_x_2, q_len, _ = hidden_states.size()
 
     assert bsz_x_2 % 2 == 0
 
