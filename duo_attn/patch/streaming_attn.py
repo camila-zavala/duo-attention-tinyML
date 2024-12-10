@@ -37,7 +37,7 @@ def streaming_attn_sdpa(query_states, key_states, value_states, streaming_causal
         value_states,
         attn_mask=streaming_causal_mask[:, :, :seq_len, :seq_len],
         dropout_p=0.0,
-        enable_gqa=True,
+        # enable_gqa=True,
     )
 
     return streaming_attn_output.transpose(1, 2)
