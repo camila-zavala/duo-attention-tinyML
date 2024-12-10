@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument("--deploy_sink_size", type=int, default=None)
     parser.add_argument("--deploy_recent_size", type=int, default=None)
     parser.add_argument("--reg_weight", type=float, default=0.05)
-    parser.add_argument("--initial_value", type=float, default=1.0)
+    parser.add_argument("--initial_value", type=float, default=0.5)
     parser.add_argument("--exp_name", type=str, default=None)
     parser.add_argument("--enable_pp", action="store_true")
     parser.add_argument("--enable_tp", action="store_true")
