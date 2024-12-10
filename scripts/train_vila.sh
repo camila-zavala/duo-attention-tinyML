@@ -35,7 +35,7 @@ torchrun --nnodes 1 --nproc_per_node 1 \
     --disable_wandb \
     --streaming_attn_implementation sdpa \
     --save_steps 10 \
-    # --resume \
+    --resume \
     --anno-path "/content/drive/MyDrive/VNBench-annotations.json" \
     --video-dir "/content/drive/MyDrive" \
     --num-video-frames ${num_video_frames} \
