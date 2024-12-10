@@ -77,6 +77,11 @@ def parse_args():
 
     parser.add_argument("--seed", type=int, default=42)
 
+    parser.add_argument("--model-base", type=str, default=None)
+    parser.add_argument("--num-video-frames", type=int, default=6)
+    parser.add_argument("--anno-path", type=str, default="/content/drive/MyDrive/VNBench-annotations.json")
+    parser.add_argument("--video-dir", type=str, default="/content/drive/MyDrive")
+
     args = parser.parse_args()
 
     args.device = parse_device(args.device)
